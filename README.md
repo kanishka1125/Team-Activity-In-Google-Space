@@ -1,6 +1,6 @@
 # Team Activity in Google Space
 
-A small Node.js + TypeScript service that watches Intigate's **Time Tracker** and posts to a **Google Chat Space**:
+A small Node.js + TypeScript service that watches a **Time Tracker** and posts to a **Google Chat Space**:
 
 - **Team Activity**: who logged in, who switched project, who is on leave.
 - **Good Morning**: a weekday message with a daily quote and image.
@@ -51,7 +51,7 @@ Health check: `GET http://localhost:4000/health`
 ```json
 {
   "status": "ok",
-  "service": "intigate-google-space-team-activity",
+  "service": "…",
   "timestamp": "2026-09-29T11:22:05.614Z",
   "teamActivity": { "running": true, "checking": false, "lastCheckFinishedAt": "2026-09-29T11:22:01.213Z", "pending": 0 }
 }
