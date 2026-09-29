@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+
+# Secrets
+.env
+
+# Runtime state (written by the service)
+team-activity-state/
+.good-morning-state.json
+.good-morning-state.json.tmp
+.good-morning-quote-state.json
+.team-activity-leave-state.json
+.good-morning-quote-state.json.*
