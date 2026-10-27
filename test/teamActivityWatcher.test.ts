@@ -337,12 +337,13 @@ describe("Team Activity delivery state", () => {
     release();
   });
 
-  it("leave on startup is announced once, and not again after restart", async () => {
+  it("leave seen on a first run is recorded but not posted, and never posted after restart", async () => {
     const lv = activity("Lina", "", "", "24-09-2026", "leave");
     h.rows.push(lv);
     await h.watcher().check();
     await h.watcher().check();
-    expect(h.chat.sent).toEqual(["🔴 Lina is on leave today"]);
+    expect(h.chat.sent).toEqual([]);
+    expect(h.statusOf(lv.id)).toBe("skipped");
   });
 
   it("leave already sent by the old implementation is not resent", async () => {

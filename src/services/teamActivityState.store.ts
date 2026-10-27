@@ -595,6 +595,8 @@ function activityLabel(type: string): string {
       return "Switched project";
     case "leave":
       return "On leave";
+    case "unallocated":
+      return "Unallocated resources";
     default:
       return type;
   }

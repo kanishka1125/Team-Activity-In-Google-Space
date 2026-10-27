@@ -10,7 +10,9 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "vitest run",
-    "resend-today": "node scripts/resend-today.mjs"
+    "resend-today": "node scripts/resend-today.mjs",
+    "missing-timesheet:dry-run": "npm run build && node scripts/missing-timesheet.mjs",
+    "missing-timesheet:send-test": "npm run build && node scripts/missing-timesheet.mjs --send-test"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

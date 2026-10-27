@@ -84,7 +84,7 @@ describe("Google Chat request time limit", () => {
     await expect(new GoogleChatService(300).sendGoodMorningMessage("hi")).rejects.toThrow("did not respond");
   });
 
-  it("successful sends are unchanged: same payloads as before", async () => {
+  it("successful sends: team activity is plain text, Good Morning card has a clickable image and a Download button", async () => {
     process.env.GOOGLE_CHAT_TEAM_ACTIVITY_WEBHOOK_URL = `${base}/ok`;
     process.env.GOOD_MORNING_IMAGE_URL = `${base}/img.png`;
     const chat = new GoogleChatService();
@@ -99,7 +99,24 @@ describe("Google Chat request time limit", () => {
         {
           cardId: "good-morning",
           card: {
-            sections: [{ widgets: [{ image: { imageUrl: `${base}/img.png`, altText: "Good Morning Team" } }] }],
+            sections: [
+              {
+                widgets: [
+                  {
+                    image: {
+                      imageUrl: `${base}/img.png`,
+                      altText: "Good Morning Team",
+                      onClick: { openLink: { url: `${base}/img.png` } },
+                    },
+                  },
+                  {
+                    buttonList: {
+                      buttons: [{ text: "Download image", onClick: { openLink: { url: `${base}/img.png` } } }],
+                    },
+                  },
+                ],
+              },
+            ],
           },
         },
       ],
@@ -418,7 +435,7 @@ describe("real backend", () => {
 
   it("port already in use → exits with a clear message and never starts the watchers", async () => {
     const blocker = net.createServer();
-    await new Promise<void>((r) => blocker.listen(0, "127.0.0.1", r));
+    await new Promise<void>((r) => blocker.listen(0, r));
     const port = (blocker.address() as net.AddressInfo).port;
 
     try {
@@ -434,7 +451,7 @@ describe("real backend", () => {
     }
   }, 60_000);
 
-  it("/health keeps status ok and adds Team Activity detail; SIGTERM lets the send in flight finish", async () => {
+  it.skipIf(process.platform === "win32")("/health keeps status ok and adds Team Activity detail; SIGTERM lets the send in flight finish", async () => {
     const probe = net.createServer();
     await new Promise<void>((r) => probe.listen(0, "127.0.0.1", r));
     const port = (probe.address() as net.AddressInfo).port;

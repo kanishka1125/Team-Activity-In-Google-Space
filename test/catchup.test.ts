@@ -124,11 +124,11 @@ describe("posting activity missed while the service was down", () => {
     expect(sent).toEqual([]);
   });
 
-  it("leave is still announced once on start-up", async () => {
+  it("leave already in the Time Tracker on a first run is not replayed", async () => {
     rows = [act("Lina Roy", "", "", "29-09-2026", "leave")];
     await watcher().check();
     await watcher().check();
-    expect(sent).toEqual(["🔴 Lina Roy is on leave today"]);
+    expect(sent).toEqual([]);
   });
 });
 

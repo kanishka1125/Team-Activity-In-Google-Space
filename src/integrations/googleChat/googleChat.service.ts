@@ -1,3 +1,8 @@
+import {
+  goodMorningImages,
+  type GoodMorningImagePicker,
+} from "../../services/goodMorningImages.service.js";
+
 // How long to wait for Google Chat to answer. Without a limit a stuck
 // connection would keep the Team Activity / Good Morning check running
 // forever and nothing else could be sent until a restart. A timeout is
@@ -7,6 +12,9 @@ export const GOOGLE_CHAT_TIMEOUT_MS = 15_000;
 export class GoogleChatService {
   constructor(
     private readonly timeoutMs: number = GOOGLE_CHAT_TIMEOUT_MS,
+    // Picks today's Good Morning picture (the rotation list, or
+    // GOOD_MORNING_IMAGE_URL when there is no list).
+    private readonly images: GoodMorningImagePicker = goodMorningImages,
   ) {}
 
   async sendTeamActivityMessage(
@@ -36,14 +44,12 @@ export class GoogleChatService {
       );
     }
 
-    const imageUrl =
-      process.env.GOOD_MORNING_IMAGE_URL;
+    // Throws "GOOD_MORNING_IMAGE_URL is not configured" when there is
+    // neither a picture list nor the single picture setting. Picking does
+    // not use the picture up; that happens only after a successful send.
+    const choice = this.images.pick();
 
-    if (!imageUrl) {
-      throw new Error(
-        "GOOD_MORNING_IMAGE_URL is not configured",
-      );
-    }
+    const imageUrl = choice.url;
 
     await this.postJson(webhookUrl, {
       text: message,
@@ -55,9 +61,27 @@ export class GoogleChatService {
               {
                 widgets: [
                   {
+                    // Clicking the picture opens the full-size file.
                     image: {
                       imageUrl,
                       altText: "Good Morning Team",
+                      onClick: {
+                        openLink: { url: imageUrl },
+                      },
+                    },
+                  },
+                  {
+                    // Chat cannot force a download, so the button
+                    // opens the image where it can be saved.
+                    buttonList: {
+                      buttons: [
+                        {
+                          text: "Download image",
+                          onClick: {
+                            openLink: { url: imageUrl },
+                          },
+                        },
+                      ],
                     },
                   },
                 ],
@@ -67,6 +91,21 @@ export class GoogleChatService {
         },
       ],
     });
+
+    // Google Chat accepted it: this picture is now used up.
+    this.images.markSent(choice);
+  }
+
+  // Missing Timesheet report. Unlike the two methods above this never reads
+  // GOOGLE_CHAT_TEAM_ACTIVITY_WEBHOOK_URL itself: the caller must pass the
+  // webhook, already chosen and checked by config/missingTimesheetConfig.ts
+  // (the testing Space, or the main Space only when explicitly enabled),
+  // so it cannot post to the main Space by accident.
+  async sendMissingTimesheetMessage(
+    webhookUrl: string,
+    message: string,
+  ): Promise<void> {
+    await this.sendMessage(webhookUrl, message);
   }
 
   private async sendMessage(
