@@ -12,11 +12,6 @@ import {
 } from "./teamActivityState.store.js";
 import { LogThrottle } from "./logThrottle.js";
 import {
-  UnallocatedResourcesJob,
-  createUnallocatedJobFromEnv,
-  describeUnallocatedConfig,
-} from "./unallocated.service.js";
-import {
   DEFAULT_TEAM_ACTIVITY_POLL_INTERVAL_MS,
   resolveStatePath,
 } from "../config/runtimeConfig.js";
@@ -52,10 +47,6 @@ const SEND_GAP_MS = 1_100;
 const RETRY_BASE_MS = 5_000;
 const RETRY_MAX_MS = 5 * 60_000;
 
-// Unallocated-resources report: wait this long before asking Keka / PMS
-// again after a failed attempt (they are only asked from 12 PM on).
-const UNALLOCATED_RETRY_MS = 5 * 60_000;
-
 interface ChatSender {
   sendTeamActivityMessage(message: string): Promise<void>;
 }
@@ -72,10 +63,6 @@ export interface TeamActivityWatcherOptions {
   sleep?: (ms: number) => Promise<void>;
   legacyLeaveStateFile?: string;
   logs?: LogThrottle;
-  // Daily ~12 PM unallocated-resources report. Default: built from the
-  // environment (off unless Keka + PMS are configured). Pass null to
-  // switch it off.
-  unallocated?: UnallocatedResourcesJob | null;
 }
 
 const defaultSleep = (ms: number) =>
@@ -145,16 +132,6 @@ export class TeamActivityWatcherService {
   // For /health: when the last check finished (ISO time).
   private lastCheckFinishedAt: string | null = null;
 
-  private readonly unallocated: UnallocatedResourcesJob | null;
-
-  // Date for which the unallocated report needs no further work (it is
-  // already in the state file, nobody qualified, or the day's window
-  // has passed).
-  private unallocatedDoneDate = "";
-
-  // No new Keka / PMS attempt before this time (after a failure).
-  private unallocatedNextTryAt = 0;
-
   constructor(options: TeamActivityWatcherOptions = {}) {
     this.store = options.store ?? new TeamActivityStateStore();
     this.activitySource =
@@ -168,10 +145,6 @@ export class TeamActivityWatcherService {
     this.legacyLeaveStateFile =
       options.legacyLeaveStateFile ??
       resolveStatePath(".team-activity-leave-state.json");
-    this.unallocated =
-      options.unallocated === undefined
-        ? createUnallocatedJobFromEnv()
-        : options.unallocated;
   }
 
   start(
@@ -186,7 +159,6 @@ export class TeamActivityWatcherService {
     console.log(
       `Google Chat Team Activity watcher started (polling every ${Math.round(intervalMs / 1000)}s, state: ${this.store.directory}).`,
     );
-    console.log(describeUnallocatedConfig());
 
     void this.check();
 
@@ -279,10 +251,6 @@ export class TeamActivityWatcherService {
 
       if (activities) {
         this.recordNewActivities(activities);
-
-        // Needs today's Time Tracker rows (for leave), so it only runs
-        // after a successful fetch.
-        await this.queueUnallocatedReport(activities);
       }
 
       await this.deliverPending();
@@ -480,6 +448,22 @@ export class TeamActivityWatcherService {
         continue;
       }
 
+      // One leave message per person per day, whichever source (Keka or
+      // the Time Tracker) reported it first, even if the two systems have
+      // a different email for the same person: match by name as well.
+      if (
+        activity.type === "leave" &&
+        state.records.some(
+          (record) =>
+            record.type === "leave" &&
+            record.employee.trim().toLowerCase() ===
+              String(activity.name ?? "").trim().toLowerCase(),
+        )
+      ) {
+        ids.add(activity.id);
+        continue;
+      }
+
       ids.add(activity.id);
 
       let status: TeamActivityRecord["status"] = "pending";
@@ -530,142 +514,6 @@ export class TeamActivityWatcherService {
     }
   }
 
-  // -------------------------------------------------------------
-  // Unallocated resources (daily, from 12 PM India time)
-  //
-  // Becomes one more record in today's state file with the stable ID
-  // unallocated-YYYY-MM-DD, so it follows the SAME lifecycle as every
-  // other message: saved as PENDING first, sent by deliverPending(),
-  // marked SENT on success, retried with backoff on failure, and never
-  // created again once the ID is in the file (also after a restart).
-  // -------------------------------------------------------------
-
-  private async queueUnallocatedReport(
-    activities: TeamActivityEvent[],
-  ): Promise<void> {
-    const job = this.unallocated;
-    const day = this.today;
-
-    if (!job || this.stopping || this.unallocatedDoneDate === day) {
-      return;
-    }
-
-    const id = `unallocated-${day}`;
-    const state = this.states.get(day);
-
-    if (!state) {
-      return;
-    }
-
-    if (state.records.some((record) => record.activityId === id)) {
-      this.unallocatedDoneDate = day;
-      return;
-    }
-
-    const now = this.now();
-    const minutes = this.getMinutesOfDay(now);
-
-    if (minutes < job.checkMinutes) {
-      return;
-    }
-
-    if (minutes > job.latestMinutes) {
-      this.unallocatedDoneDate = day;
-
-      console.warn(
-        `Unallocated resources: it is past the cut-off time, so no report is sent for ${day}.`,
-      );
-
-      return;
-    }
-
-    if (
-      this.unsaved.has(day) ||
-      now.getTime() < this.unallocatedNextTryAt
-    ) {
-      return;
-    }
-
-    let message: string | null;
-
-    try {
-      message = await job.evaluate(activities, day);
-
-      this.logs.success(
-        "unallocated",
-        "Unallocated resources: Keka and PMS are reachable again.",
-      );
-    } catch (error) {
-      // Not sent, not guessed: try again in a few minutes.
-      this.unallocatedNextTryAt =
-        this.now().getTime() + UNALLOCATED_RETRY_MS;
-
-      this.logs.failure(
-        "unallocated",
-        "Unallocated resources: could not read Keka / PMS completely, so NO report is sent; will retry in 5 minutes.",
-        error,
-      );
-
-      return;
-    }
-
-    // The day may have changed while Keka / PMS were being read.
-    if (this.today !== day || this.stopping) {
-      return;
-    }
-
-    if (message === null) {
-      this.unallocatedDoneDate = day;
-      return;
-    }
-
-    if (state.records.some((record) => record.activityId === id)) {
-      this.unallocatedDoneDate = day;
-      return;
-    }
-
-    state.records.push({
-      activityId: id,
-      type: "unallocated",
-      employee: "Team",
-      email: "",
-      fromProject: null,
-      toProject: "",
-      timestamp: this.formatTime(
-        `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}`,
-      ),
-      message,
-      status: "pending",
-      attempts: 0,
-      lastError: null,
-      nextAttemptAt: null,
-      sendStartedAt: null,
-      detectedAt: now.toISOString(),
-      sentAt: null,
-    });
-
-    this.unallocatedDoneDate = day;
-    this.persist(state);
-  }
-
-  // Minutes since midnight in India time.
-  private getMinutesOfDay(date: Date): number {
-    const parts: Record<string, string> = {};
-
-    for (const part of new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Kolkata",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(date)) {
-      if (part.type !== "literal") {
-        parts[part.type] = part.value;
-      }
-    }
-
-    return Number(parts.hour) * 60 + Number(parts.minute);
-  }
-
   private getOrLoadState(
     date: string,
   ): DailyTeamActivityState {
@@ -701,7 +549,7 @@ export class TeamActivityWatcherService {
     nowIso: string,
   ): TeamActivityRecord {
     const icon =
-      activity.type === "leave" ? "🔴" : "🟢";
+      activity.icon ?? (activity.type === "leave" ? "🔴" : "🟢");
 
     return {
       activityId: activity.id,

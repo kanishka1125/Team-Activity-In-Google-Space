@@ -1,5 +1,10 @@
 import { TimeTrackerService } from "../integrations/timeTracker/timeTracker.service.js";
 import type { RawTimeTrackerEntry } from "../integrations/timeTracker/timeTracker.types.js";
+import {
+  createCachedLeaveLookupFromEnv,
+  isWorkingWeekday,
+  type LeaveLookup,
+} from "./kekaLeave.service.js";
 
 export type TeamActivityType =
   | "login"
@@ -18,6 +23,9 @@ export interface TeamActivityEvent {
   dateSubmitted: string;
   totalHours: number;
   message: string;
+  // Emoji shown in front of the message; the sender's default when absent
+  // (red circle for leave, green for work).
+  icon?: string;
 }
 
 export class TeamActivityService {
@@ -30,11 +38,107 @@ export class TeamActivityService {
   // Rows already reported as unreadable (warn once per row per day).
   private reportedInvalidRows = new Set<string>();
 
-  constructor() {
+  // Leave comes from Keka: a request such as 12 → 16 gives the leave message
+  // on every working day in the range (Keka, not the Time Tracker, is the
+  // source; Time Tracker leave rows still work and are never duplicated).
+  private readonly leaveLookup: LeaveLookup | null;
+  private lastLeaveWarningAt = 0;
+
+  // `leaveLookup`: omit to use Keka from the environment (none when Keka is
+  // not configured); pass null to turn Keka leave off.
+  constructor(leaveLookup?: LeaveLookup | null) {
     this.timeTrackerService = new TimeTrackerService();
+    this.leaveLookup =
+      leaveLookup === undefined ? createCachedLeaveLookupFromEnv() : leaveLookup;
   }
 
   async getActivity(): Promise<TeamActivityEvent[]> {
+    return this.withKekaLeave(await this.getTrackerActivity());
+  }
+
+  // Adds "X is on leave today" (or "half-day leave", first/second half) for
+  // everyone Keka shows on leave today who has no leave event yet. Whole-day
+  // and half-day leave share ONE id per person per day, so a person is never
+  // announced twice, whichever source reports it first. Only on working days (Mon–Fri) that have real work
+  // activity, so weekends and holidays stay quiet. If Keka cannot be read,
+  // the normal activity still goes out.
+  private async withKekaLeave(
+    events: TeamActivityEvent[],
+  ): Promise<TeamActivityEvent[]> {
+    const today = this.getToday();
+
+    if (
+      !this.leaveLookup ||
+      !isWorkingWeekday(today) ||
+      !events.some((event) => event.type !== "leave")
+    ) {
+      return events;
+    }
+
+    let people;
+
+    try {
+      people = await this.leaveLookup.getLeavePeople(today);
+    } catch (error) {
+      if (Date.now() - this.lastLeaveWarningAt > 5 * 60_000) {
+        this.lastLeaveWarningAt = Date.now();
+
+        console.warn(
+          `Team Activity: Keka leave could not be read (${error instanceof Error ? error.message : String(error)}); leave from Keka is not added this time.`,
+        );
+      }
+
+      return events;
+    }
+
+    const leaveEvents = events.filter((event) => event.type === "leave");
+    const known = new Set(leaveEvents.map((event) => event.email));
+    // Same person under a different email in the Time Tracker and Keka:
+    // the name is a second guard so they are never announced twice.
+    const knownNames = new Set(
+      leaveEvents.map((event) => event.name.trim().toLowerCase()),
+    );
+
+    const [year, month, day] = today.split("-");
+
+    const extra: TeamActivityEvent[] = people
+      .filter(
+        (person) =>
+          !known.has(person.email) &&
+          !knownNames.has(person.name.trim().toLowerCase()),
+      )
+      .map((person) => ({
+        // Same ID as a Time Tracker leave row: never announced twice.
+        id: `leave-${person.email}-${today}`,
+        type: "leave" as const,
+        name: person.name,
+        email: person.email,
+        project: "On Leave",
+        previousProject: null,
+        startTime: "",
+        dateSubmitted: `${day}-${month}-${year}`,
+        totalHours: 0,
+        // Half-day leave: moon half-lit on the left (first half) / right (second half).
+        icon: person.part === "first" ? "🌗" : person.part === "second" ? "🌓" : undefined,
+        message:
+          person.part === "first"
+            ? `${person.name} is on half-day leave today (first half)`
+            : person.part === "second"
+              ? `${person.name} is on half-day leave today (second half)`
+              : `${person.name} is on leave today`,
+      }));
+
+    if (extra.length === 0) {
+      return events;
+    }
+
+    const leaves = events.filter((event) => event.type === "leave");
+    const rest = events.filter((event) => event.type !== "leave");
+
+    return [...leaves, ...extra, ...rest];
+  }
+
+  private async getTrackerActivity(): Promise<TeamActivityEvent[]> {
     const entries = await this.timeTrackerService.getTimeEntries();
 
     const today = this.getToday();

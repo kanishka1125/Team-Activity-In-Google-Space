@@ -33,9 +33,23 @@ const EMPLOYMENT_STATUS_WORKING = 0;
 export interface KekaEmployee {
   id: string;
   name: string;
-  // Lower-case, trimmed. The matching key across Keka, PMS and the
+  // Lower-case, trimmed. The matching key across Keka and the
   // Time Tracker.
   email: string;
+}
+
+export interface KekaLeaveRequest {
+  // The Keka employee id (matches KekaEmployee.id).
+  employeeId: string;
+  // "YYYY-MM-DD"
+  fromDate: string;
+  toDate: string;
+  // 0 = first half of the day, 1 = second half.
+  fromSession: number;
+  toSession: number;
+  // Keka: 0 = pending, 1 = approved; anything else (rejected, cancelled,
+  // withdrawn) is not leave.
+  status: number;
 }
 
 export interface KekaClientOptions {
@@ -160,7 +174,7 @@ export class KekaClient {
         const email = normaliseEmail(record.email);
 
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-          // Cannot be matched with PMS / Time Tracker, so cannot be
+          // Cannot be matched with the Time Tracker, so cannot be
           // evaluated. Counted and reported, never guessed.
           skippedNoEmail++;
           continue;
@@ -205,6 +219,78 @@ export class KekaClient {
     }
 
     return employees;
+  }
+
+  // Leave requests that overlap [from, to] (both "YYYY-MM-DD"), any
+  // status (the caller decides which count). Never a partial list: a
+  // failed page or a count mismatch throws.
+  //   GET /api/v1/time/leaverequests?from=&to=&pageNumber=N&pageSize=200
+  async getLeaveRequests(from: string, to: string): Promise<KekaLeaveRequest[]> {
+    const requests: KekaLeaveRequest[] = [];
+    let fetched = 0;
+    let totalRecords = -1;
+    let page = 1;
+    let totalPages = 1;
+
+    do {
+      const body = await this.getJson(
+        `/api/v1/time/leaverequests?from=${from}&to=${to}&pageNumber=${page}&pageSize=${PAGE_SIZE}`,
+      );
+
+      const parsed = body as {
+        succeeded?: unknown;
+        data?: unknown;
+        totalPages?: unknown;
+        totalRecords?: unknown;
+      } | null;
+
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        parsed.succeeded !== true ||
+        !Array.isArray(parsed.data) ||
+        !Number.isInteger(parsed.totalPages) ||
+        !Number.isInteger(parsed.totalRecords)
+      ) {
+        throw new Error("Keka returned an unexpected leave response (not a successful list).");
+      }
+
+      totalPages = parsed.totalPages as number;
+      totalRecords = parsed.totalRecords as number;
+
+      if (totalPages > MAX_PAGES) {
+        throw new Error(`Keka reports ${totalPages} pages of leave requests; refusing to continue.`);
+      }
+
+      for (const raw of parsed.data as unknown[]) {
+        fetched++;
+
+        if (!raw || typeof raw !== "object") {
+          throw new Error("Keka returned a leave request that is not an object.");
+        }
+
+        const record = raw as Record<string, unknown>;
+
+        requests.push({
+          employeeId: String(record.employeeIdentifier ?? ""),
+          fromDate: String(record.fromDate ?? "").slice(0, 10),
+          toDate: String(record.toDate ?? "").slice(0, 10),
+          fromSession: Number(record.fromSession ?? 0),
+          toSession: Number(record.toSession ?? 1),
+          status: Number(record.status),
+        });
+      }
+
+      page++;
+    } while (page <= totalPages);
+
+    if (fetched !== totalRecords) {
+      throw new Error(
+        `Keka leave list is incomplete (${fetched} received, ${totalRecords} expected).`,
+      );
+    }
+
+    return requests;
   }
 
   // ---------------------------------------------------------------

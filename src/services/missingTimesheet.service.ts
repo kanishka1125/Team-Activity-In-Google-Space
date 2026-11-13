@@ -1,3 +1,9 @@
+import {
+  KekaClient,
+  type KekaEmployee,
+  type KekaLeaveRequest,
+} from "../integrations/keka/keka.client.js";
+import { leaveEmailsForHalf, leaveEmailsOn } from "./kekaLeave.service.js";
 import { TimeTrackerClient } from "../integrations/timeTracker/timeTracker.client.js";
 import type { RawTimeTrackerEntry } from "../integrations/timeTracker/timeTracker.types.js";
 import {
@@ -8,8 +14,8 @@ import {
 // ---------------------------------------------------------------
 // Missing Timesheet: who has not logged in the Time Tracker today.
 //
-// The Time Tracker is the ONLY source. Nothing else (no PMS, no Keka, no
-// attendance system) is read or combined.
+// The Time Tracker is the source of who logged. The only other thing read is
+// Keka LEAVE (read-only), so people on leave are never listed.
 //
 //   people     = everyone with a WORK row in the Time Tracker in the last
 //                30 days before today (leave rows alone do not count), minus
@@ -98,9 +104,16 @@ export function findMissingTimesheets(input: {
   today: string;
   // Emails that are never listed (approved leadership), any case.
   excludedEmails?: Iterable<string>;
+  // Emails on leave today according to Keka (approved or pending). They are
+  // never listed, even when the Time Tracker has no leave row for them.
+  leaveEmails?: Iterable<string>;
 }): MissingTimesheetResult {
   const excluded = new Set(
     [...(input.excludedEmails ?? [])].map((email) => normEmail(email)),
+  );
+
+  const kekaLeave = new Set(
+    [...(input.leaveEmails ?? [])].map((email) => normEmail(email)),
   );
 
   const earliest = addDays(input.today, -ACTIVE_WINDOW_DAYS);
@@ -150,6 +163,11 @@ export function findMissingTimesheets(input: {
 
   const noDataToday = rowsToday === 0;
 
+  for (const email of kekaLeave) {
+    loggedToday.add(email);
+    onLeaveToday.add(email);
+  }
+
   let excludedCount = 0;
   const missing: MissingPerson[] = [];
 
@@ -191,6 +209,25 @@ export function findMissingTimesheets(input: {
 const TZ = "Asia/Kolkata";
 
 // "YYYY-MM-DD" in India time.
+// Which half of the working day a check falls in: 0 = first half (before
+// 2:00 PM India time), 1 = second half. Half-day leave only excuses the half
+// it covers, so a first-half leave is not listed at 12:00 PM but is listed at
+// 3:00 PM if still nothing is logged (and the other way round).
+export function currentHalf(at: Date): number {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(at)
+      .map((p) => [p.type, p.value]),
+  );
+
+  return Number(parts.hour) * 60 + Number(parts.minute) < 14 * 60 ? 0 : 1;
+}
+
 export function indiaDate(at: Date): string {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat("en-CA", {
@@ -289,6 +326,38 @@ export interface RowSource {
   getData(): Promise<RawTimeTrackerEntry[]>;
 }
 
+// ---------------------------------------------------------------
+// Leave from Keka (read-only). The Time Tracker only gets a leave row once a
+// request is synced, and pending requests are not, so Keka is asked directly.
+// A person is on leave on a day when BOTH halves of that day are covered by
+// a pending or approved request (a lone half-day leave still has to log).
+// ---------------------------------------------------------------
+
+export { leaveEmailsOn };
+
+export interface LeaveSource {
+  // Emails (lower case) on leave on `date` ("YYYY-MM-DD"). THROWS when
+  // Keka cannot be read completely.
+  // `half`: 0 = first half of the day, 1 = second half.
+  getLeaveEmails(date: string, half: number): Promise<Set<string>>;
+}
+
+export function createKekaLeaveSource(client: {
+  getActiveEmployees(): Promise<KekaEmployee[]>;
+  getLeaveRequests(from: string, to: string): Promise<KekaLeaveRequest[]>;
+}): LeaveSource {
+  return {
+    async getLeaveEmails(date, half) {
+      const [employees, requests] = await Promise.all([
+        client.getActiveEmployees(),
+        client.getLeaveRequests(date, date),
+      ]);
+
+      return leaveEmailsForHalf(date, half, requests, employees);
+    },
+  };
+}
+
 export interface MissingTimesheetReport {
   // null when there is nothing to send.
   message: string | null;
@@ -306,6 +375,8 @@ export class MissingTimesheetReporter {
     private readonly source: RowSource,
     now?: () => Date,
     private readonly excludedEmails: string[] = [],
+    // Optional: when set, people on leave in Keka are left out too.
+    private readonly leaveSource?: LeaveSource,
   ) {
     this.now = now ?? (() => new Date());
   }
@@ -320,10 +391,19 @@ export class MissingTimesheetReporter {
 
     const retrievedAt = this.now();
 
+    const today = indiaDate(retrievedAt);
+
+    // If Keka is configured but cannot be read this THROWS: no message,
+    // nothing guessed (the watcher retries within the slot's window).
+    const leaveEmails = this.leaveSource
+      ? await this.leaveSource.getLeaveEmails(today, currentHalf(retrievedAt))
+      : undefined;
+
     const result = findMissingTimesheets({
       rows,
-      today: indiaDate(retrievedAt),
+      today,
       excludedEmails: this.excludedEmails,
+      leaveEmails,
     });
 
     const names = result.missing.map((person) => person.name);
@@ -353,9 +433,19 @@ export class MissingTimesheetReporter {
 export function createMissingTimesheetReporterFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): MissingTimesheetReporter {
+  // Keka leave is used only when every Keka setting is present; otherwise
+  // the report works from the Time Tracker alone, as before.
+  const kekaConfigured = [
+    "KEKA_BASE_URL",
+    "KEKA_CLIENT_ID",
+    "KEKA_CLIENT_SECRET",
+    "KEKA_API_KEY",
+  ].every((name) => (env[name] ?? "").trim() !== "");
+
   return new MissingTimesheetReporter(
     new TimeTrackerClient(),
     undefined,
     readMissingTimesheetConfig(env).excludedEmails,
+    kekaConfigured ? createKekaLeaveSource(new KekaClient({ env })) : undefined,
   );
 }

@@ -76,13 +76,8 @@ Copy `.env.example` to `.env`. Never commit `.env`.
 | `TEAM_ACTIVITY_WATCHER_ENABLED` | no | `true` | Turn Team Activity off on an instance |
 | `TEAM_ACTIVITY_POLL_INTERVAL_MS` | no | `15000` | Polling interval (minimum 5000) |
 | `GOOD_MORNING_ENABLED` | no | `true` | Turn Good Morning off on an instance |
-| `KEKA_BASE_URL`, `KEKA_CLIENT_ID`, `KEKA_CLIENT_SECRET`, `KEKA_API_KEY` | no* | – | Keka (read-only) employee list for the 12 PM unallocated report (*all six Keka/PMS settings are needed to turn the report on) |
+| `KEKA_BASE_URL`, `KEKA_CLIENT_ID`, `KEKA_CLIENT_SECRET`, `KEKA_API_KEY` | no* | – | Keka (read-only): leave requests and the employee list. *All four are needed; without them leave comes from the Time Tracker only |
 | `KEKA_AUTH_URL` | no | `https://login.keka.com/connect/token` | Keka sign-in address |
-| `PMS_TASKS_API_URL`, `PMS_API_KEY` | no* | – | PMS tasks (read-only) for the unallocated report |
-| `UNALLOCATED_ENABLED` | no | `true` | Turn the unallocated report off |
-| `UNALLOCATED_CHECK_HOUR` / `UNALLOCATED_LATEST_HOUR` | no | `12` / `15` | India-time hour it starts, and the last hour it may still be sent |
-| `UNALLOCATED_EXCLUDED_EMAILS` | no | – | Comma-separated emails never listed (approved founders / leadership) |
-| `UNALLOCATED_EMAIL_ALIASES` | no | – | `other@x=keka@x,…` when a person's Time Tracker / PMS email differs from Keka's |
 | `MISSING_TIMESHEET_POST_TO_MAIN_SPACE` | no | `false` | `true` = post the Missing Timesheet report to the **main** Space (using `GOOGLE_CHAT_TEAM_ACTIVITY_WEBHOOK_URL`). Off = it posts only to a testing Space. Nothing else can switch the main Space on |
 | `MISSING_TIMESHEET_WEBHOOK_URL` | testing mode | – | Incoming webhook of a dedicated testing Space (used when `MISSING_TIMESHEET_POST_TO_MAIN_SPACE` is not true). In this mode the main Space is refused and there is no fallback to it |
 | `MISSING_TIMESHEET_EXPECTED_SPACE_ID` | no | – | Extra safety: the id of the Space the chosen destination MUST belong to (the part after `/spaces/` in its webhook). Refused if it differs |
@@ -105,28 +100,19 @@ Full details are in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 Good Morning runs every 30 s, sends once per weekday between **9:30 and 10:00 IST**, and retries every minute if it fails. Keep the service running by 10:00 AM on weekdays.
 
-## Unallocated resources (12 PM)
+## Leave (from Keka)
 
-Once a day from **12:00 India time** (not after 15:59) the service posts to the Team Activity space:
+**Keka is the source of leave; the Time Tracker's leave rows are the second source.** Every poll, everyone on leave today in Keka (pending and approved are treated the same) gets `🔴 Name is on leave today`. A request such as 12 → 16 gives the message on **every working day** (Monday–Friday) from 12 to 16, with no need to look in Keka.
 
-```
-🟡 Unallocated resources for today:
-
-Name one
-Name two
-```
-
-Who is listed: every **Working** employee in **Keka** (read-only, loaded fresh each day, nothing hard-coded) **minus** the approved exclusions, **minus** people on leave today (Time Tracker leave rows), **minus** people with a qualifying **PMS** task. A qualifying task is assigned to the person's email, has status `Backlog`, `To Do` or `In Progress`, and a due date of today or later (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM`). `Done` and `Closed` do not count; an unrecognised status is not assumed open and is reported in the log. A subtask assigned to the person counts the same way.
-
-- Nothing is posted if nobody qualifies.
-- If Keka or PMS cannot be read completely (error, time-out, HTML page, empty or mismatched list), **nothing is posted**; it retries every 5 minutes until 15:59.
-- It is an ordinary Team Activity record with the stable ID `unallocated-YYYY-MM-DD`: saved `PENDING`, marked `SENT` after delivery, retried like every other message, and never created twice for a day, also after a restart.
-- It is off unless all Keka and PMS settings are present, so nothing changes where they are not set.
-- Credentials are never logged. Keka and PMS are only read, never changed.
+- **Half days:** a half-day leave also gets a message (`🌗 Name is on half-day leave today (first half)` / `🌓 … (second half)`). In Missing Timesheet the half matters: first-half leave is skipped at 12:00 PM and listed at 3:00 PM if nothing is logged, second-half leave is the reverse, a full day is never listed.
+- **Never twice:** one leave message per person per day, whether it is whole-day, half-day, from Keka or from the Time Tracker. They share one fixed ID (`leave-<email>-<date>`); it is saved as `PENDING` before sending and `SENT` after. If the other source reports the same person later (even under a different email: the name is checked too), or after a restart, nothing is sent again. A half-day that becomes a whole day, or a pending leave that gets approved, is not announced again.
+- **Working days only:** nothing is announced on Saturday/Sunday, or on a day with no work activity at all (a holiday).
+- **If Keka cannot be read:** normal activity still goes out; the last good leave list for the day is reused; Missing Timesheet posts nothing rather than guess.
+- Keka is asked at most once every 10 minutes and is only read, never changed.
 
 ## Missing Timesheet (12:00 PM and 3:00 PM IST, Time Tracker only)
 
-A report that lists the people who have **not logged in the Time Tracker today**. It uses the **Time Tracker only**: no PMS, no Keka, no attendance system.
+A report that lists the people who have **not logged in the Time Tracker today**. Logging comes from the **Time Tracker**; leave comes from **Keka**.
 
 ```
 🟡 Missing Timesheet — 12:00 PM IST
@@ -143,7 +129,7 @@ Total missing timesheets: 2
 How "missing" is decided:
 
 - **Who is expected to log:** everyone with a **work** row in the Time Tracker in the 30 days before today (leave rows alone do not count), minus the always-excluded emails (`MISSING_TIMESHEET_EXCLUDED_EMAILS`, approved leadership; they are never listed and not counted).
-- **Has logged:** any Time Tracker row dated today for that email: a started timer, a finished entry, or a **leave** row (leave is a reason to have no timesheet).
+- **Has logged:** any Time Tracker row dated today for that email: a started timer, a finished entry, or a **leave** row. People on leave in Keka (pending or approved, for the half of the day being checked) are never listed.
 - **Missing:** an expected person with no row today. One entry per person; the latest name in the Time Tracker is shown; sorted by name.
 - Unreadable rows (no email, bad date) and future-dated rows are ignored. If the Time Tracker cannot be read, or returns nothing usable, **no list is built and nothing is posted**; nothing is guessed.
 
@@ -174,7 +160,7 @@ npm run missing-timesheet:send-test   # posts ONE message to the configured Spac
 
 A manual send to the main Space additionally needs `node scripts/missing-timesheet.mjs --send-test --confirm-main-space`. A manual send never touches the schedule's state.
 
-**Deploying** needs only these compiled files in the server's `dist/` (same folders) plus the new settings in the server's `.env`, then a restart. Team Activity and Good Morning are not changed. Do **not** add `KEKA_*` or `PMS_*` settings.
+**Deploying** needs only these compiled files in the server's `dist/` (same folders) plus the new settings in the server's `.env`, then a restart. Team Activity and Good Morning are not changed. Add the four `KEKA_*` settings to use Keka leave.
 
 ```
 dist/config/missingTimesheetConfig.js
@@ -243,7 +229,7 @@ src/
     logThrottle.ts                     limits repeated error logs
   integrations/
     googleChat/                        webhook sender (text and card + image)
-    pms/                               PMS tasks client (used only by the separate Keka unallocated report)
+    keka/                              Keka client (employees and leave requests)
     timeTracker/                       Time Tracker client
 test/                                  automated tests
 scripts/resend-today.mjs               TEST ONLY: re-posts all of today's activity

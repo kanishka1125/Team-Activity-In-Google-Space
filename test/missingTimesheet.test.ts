@@ -17,6 +17,7 @@ import {
   parseSendTimes,
   readMissingTimesheetConfig,
 } from "../src/config/missingTimesheetConfig.js";
+import { leaveEmailsForHalf } from "../src/services/kekaLeave.service.js";
 import { GoogleChatService } from "../src/integrations/googleChat/googleChat.service.js";
 import type { RawTimeTrackerEntry } from "../src/integrations/timeTracker/timeTracker.types.js";
 import {
@@ -25,6 +26,8 @@ import {
   buildMissingTimesheetMessage,
   currentTimeLabel,
   findMissingTimesheets,
+  currentHalf,
+  leaveEmailsOn,
   missingTimesheetHeader,
   trackerDateKey,
 } from "../src/services/missingTimesheet.service.js";
@@ -373,7 +376,10 @@ describe("only the Time Tracker is used", () => {
       const code = strip(fs.readFileSync(path.join(root, file), "utf8"));
 
       expect(code, file).not.toMatch(/\bpms\b|PMS_|pms\.client|pmsRules/i);
-      expect(code, file).not.toMatch(/keka/i);
+      // Keka is allowed ONLY for reading leave, in the service file.
+      if (file !== "src/services/missingTimesheet.service.ts") {
+        expect(code, file).not.toMatch(/keka/i);
+      }
       expect(code, file).not.toMatch(/unallocated|teamActivity|team-activity/i);
 
       // Only the config may mention the main webhook, and only to choose/refuse it.
@@ -896,5 +902,99 @@ describe("destination", () => {
     expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(TEST);
 
     vi.unstubAllEnvs();
+  });
+});
+
+// ---------------------------------------------------------------
+// Keka leave: people on leave are never listed
+// ---------------------------------------------------------------
+
+describe("Keka leave", () => {
+  const employees = [
+    { id: "e1", email: "Anam@x.com" },
+    { id: "e2", email: "aniket@x.com" },
+    { id: "e3", email: "half@x.com" },
+  ];
+  const D = "2026-10-14";
+  const req = (employeeId: string, fromDate: string, toDate: string, fromSession: number, toSession: number, status: number) => ({
+    employeeId, fromDate, toDate, fromSession, toSession, status,
+  });
+
+  it("pending and approved full-day / multi-day leave count; rejected or cancelled do not", () => {
+    const set = leaveEmailsOn(D, [
+      req("e1", D, D, 0, 1, 0),
+      req("e2", "2026-10-13", D, 0, 1, 1),
+      req("e3", D, D, 0, 1, 3),
+    ], employees);
+
+    expect([...set].sort()).toEqual(["anam@x.com", "aniket@x.com"]);
+  });
+
+  it("a lone half day is not leave, two halves together are", () => {
+    expect(leaveEmailsOn(D, [req("e3", D, D, 0, 0, 1)], employees).size).toBe(0);
+    expect([...leaveEmailsOn(D, [req("e3", D, D, 0, 0, 1), req("e3", D, D, 1, 1, 0)], employees)]).toEqual(["half@x.com"]);
+  });
+
+  it("a request starting in the second half of its first day does not cover that whole day", () => {
+    expect(leaveEmailsOn(D, [req("e1", D, "2026-10-15", 1, 1, 1)], employees).size).toBe(0);
+  });
+
+  it("someone on leave in Keka is not listed even without a Time Tracker leave row", async () => {
+    const rows = [
+      row("Mia", "mia@x.com", "2026-10-13"),
+      row("Anam", "anam@x.com", "2026-10-13"),
+      row("Z", "z@x.com", TODAY),
+    ];
+
+    const reporter = new MissingTimesheetReporter(
+      { getData: async () => rows },
+      () => ist(TODAY, 12, 0, 7),
+      [],
+      { getLeaveEmails: async () => new Set(["anam@x.com"]) },
+    );
+
+    expect((await reporter.buildReport({ timeLabel: "12:00 PM" })).names).toEqual(["Mia"]);
+  });
+
+  it("if Keka cannot be read, nothing is built (no guessed list)", async () => {
+    const reporter = new MissingTimesheetReporter(
+      { getData: async () => [row("Mia", "mia@x.com", "2026-10-13"), row("Z", "z@x.com", TODAY)] },
+      () => ist(TODAY, 12, 0, 7),
+      [],
+      { getLeaveEmails: async () => { throw new Error("Keka down"); } },
+    );
+
+    await expect(reporter.buildReport()).rejects.toThrow("Keka down");
+  });
+});
+
+describe("half-day leave in the missing timesheet", () => {
+  const employees = [{ id: "e1", email: "half@x.com" }];
+  const D = "2026-10-14";
+  const half = (from: number, to: number) => [{ employeeId: "e1", fromDate: D, toDate: D, fromSession: from, toSession: to, status: 0 }];
+
+  it("first-half leave excuses the 12 PM check only; second-half leave excuses the 3 PM check only; full day both", () => {
+    expect(leaveEmailsForHalf(D, 0, half(0, 0), employees).size).toBe(1);
+    expect(leaveEmailsForHalf(D, 1, half(0, 0), employees).size).toBe(0);
+    expect(leaveEmailsForHalf(D, 0, half(1, 1), employees).size).toBe(0);
+    expect(leaveEmailsForHalf(D, 1, half(1, 1), employees).size).toBe(1);
+    expect(leaveEmailsForHalf(D, 0, half(0, 1), employees).size).toBe(1);
+    expect(leaveEmailsForHalf(D, 1, half(0, 1), employees).size).toBe(1);
+  });
+
+  it("the check at 12:00 is the first half, at 15:00 the second half", () => {
+    expect(currentHalf(ist(TODAY, 12, 0, 7))).toBe(0);
+    expect(currentHalf(ist(TODAY, 13, 59, 0))).toBe(0);
+    expect(currentHalf(ist(TODAY, 14, 0, 0))).toBe(1);
+    expect(currentHalf(ist(TODAY, 15, 0, 7))).toBe(1);
+  });
+
+  it("a first-half-leave person is skipped at 12 PM but listed at 3 PM if they have not logged", async () => {
+    const rows = [row("Mia", "mia@x.com", "2026-10-13"), row("Hana", "hana@x.com", "2026-10-13"), row("Z", "z@x.com", TODAY)];
+    const source = { getLeaveEmails: async (_d: string, h: number) => new Set(h === 0 ? ["hana@x.com"] : []) };
+    const at = (h: number) => new MissingTimesheetReporter({ getData: async () => rows }, () => ist(TODAY, h, 0, 7), [], source);
+
+    expect((await at(12).buildReport({ timeLabel: "12:00 PM" })).names).toEqual(["Mia"]);
+    expect((await at(15).buildReport({ timeLabel: "3:00 PM" })).names).toEqual(["Hana", "Mia"]);
   });
 });
