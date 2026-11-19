@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   describeMissingTimesheetConfig,
+  emailFingerprint,
+  EXCLUDED_EMAIL_FINGERPRINTS,
   extractSpaceId,
   parseExcludedEmails,
   parseSendTimes,
@@ -237,6 +239,67 @@ describe("always-excluded emails", () => {
       "tirath.sharma@intigate.in",
     ]);
     expect(warnings.join(" ")).toMatch(/not an email address/);
+  });
+});
+
+describe("exclusions kept in the code, without readable emails", () => {
+  const rows = [
+    row("Hidden Hana", "Hana@Example.com ", "2026-10-13"),
+    row("Real Missing", "real@x.com", "2026-10-13"),
+    row("Z", "z@x.com", TODAY),
+  ];
+
+  const findWith = (excludedFingerprints?: string[]) =>
+    findMissingTimesheets({ rows, today: TODAY, ...(excludedFingerprints ? { excludedFingerprints } : {}) });
+
+  it("a person whose email matches a fingerprint is never listed, and is counted as excluded", () => {
+    const r = findWith([emailFingerprint("hana@example.com")]);
+
+    expect(missingNames(r)).toEqual(["Real Missing"]);
+    expect(r.counts.excluded).toBe(1);
+    expect(r.counts.people).toBe(1); // only "Real Missing" is still expected to log
+  });
+
+  it("without the fingerprint they would be listed", () => {
+    expect(missingNames(findWith([]))).toEqual(["Hidden Hana", "Real Missing"]);
+  });
+
+  it("the fingerprint ignores case and spaces, differs per address, and does not contain the address", () => {
+    const print = emailFingerprint("hana@example.com");
+
+    expect(emailFingerprint("  HANA@Example.COM ")).toBe(print);
+    expect(emailFingerprint("hanna@example.com")).not.toBe(print);
+    expect(print).toMatch(/^[0-9a-f]{64}$/);
+    expect(print).not.toContain("hana");
+  });
+
+  it("the built-in list holds fingerprints only: no email address is written in the code", () => {
+    expect(EXCLUDED_EMAIL_FINGERPRINTS.length).toBeGreaterThan(0);
+    expect(new Set(EXCLUDED_EMAIL_FINGERPRINTS).size).toBe(EXCLUDED_EMAIL_FINGERPRINTS.length);
+
+    for (const entry of EXCLUDED_EMAIL_FINGERPRINTS) {
+      expect(entry).toMatch(/^[0-9a-f]{64}$/);
+    }
+
+    const source = fs.readFileSync(path.join(root, "src", "config", "missingTimesheetConfig.ts"), "utf-8");
+    const listed = /EXCLUDED_EMAIL_FINGERPRINTS[^=]*=\s*\[([\s\S]*?)\];/.exec(source)![1]!;
+
+    expect(listed).not.toContain("@");
+  });
+
+  it("the built-in list applies by default, on top of the .env exclusions, and leaves everyone else on the list", () => {
+    // Nobody in this data matches a built-in fingerprint.
+    expect(missingNames(findWith())).toEqual(["Hidden Hana", "Real Missing"]);
+
+    const r = findMissingTimesheets({
+      rows,
+      today: TODAY,
+      excludedEmails: ["real@x.com"],
+      excludedFingerprints: [emailFingerprint("hana@example.com")],
+    });
+
+    expect(missingNames(r)).toEqual([]);
+    expect(r.counts.excluded).toBe(2);
   });
 });
 

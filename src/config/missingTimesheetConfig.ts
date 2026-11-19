@@ -43,6 +43,8 @@
 // and token) are never returned by describeMissingTimesheetConfig().
 // ---------------------------------------------------------------
 
+import crypto from "node:crypto";
+
 import { parseBooleanSetting } from "./runtimeConfig.js";
 
 // Schedule: Monday–Friday, India Standard Time.
@@ -157,6 +159,38 @@ export function parseSendTimes(
   }
 
   return slots;
+}
+
+// ---------------------------------------------------------------
+// Exclusions kept in the code, WITHOUT readable email addresses.
+//
+// This repository can be read by other people, so an email address is never
+// written here. Each entry is a fingerprint (SHA-256) of the address as the
+// Time Tracker has it: the service can tell that a person's address matches,
+// but the address cannot be read back from the fingerprint.
+//
+// These people are left out of the Missing Timesheet list in addition to
+// MISSING_TIMESHEET_EXCLUDED_EMAILS (.env), which stays the normal place
+// for exclusions.
+//
+// To add one, print the fingerprint of the address and paste it below:
+//   node -e "console.log(require('crypto').createHash('sha256').update('missing-timesheet:' + process.argv[1].trim().toLowerCase()).digest('hex'))" someone@example.com
+// To remove one, delete its line.
+// ---------------------------------------------------------------
+
+export const EXCLUDED_EMAIL_FINGERPRINTS: readonly string[] = [
+  // TEMPORARY, added by hand on 19 Nov 2026: two people left out for the
+  // time being.
+  "37bc509ccdcbe0287f31eb0472d3f043eeee7cc8865d46fbc81c2b434ea004f3",
+  "a87ba904745ce61819ffb5f22bd07b34759d7049764deaa3b020665d6cee918a",
+];
+
+// The fingerprint of an email address (case and surrounding spaces ignored).
+export function emailFingerprint(email: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(`missing-timesheet:${email.trim().toLowerCase()}`)
+    .digest("hex");
 }
 
 const EMAIL_PATTERN = /^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$/;

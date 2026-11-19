@@ -129,6 +129,7 @@ Total missing timesheets: 2
 How "missing" is decided:
 
 - **Who is expected to log:** everyone with a **work** row in the Time Tracker in the 30 days before today (leave rows alone do not count), minus the always-excluded emails (`MISSING_TIMESHEET_EXCLUDED_EMAILS`, approved leadership; they are never listed and not counted).
+- **Exclusions kept in the code:** a few more people can be left out through `EXCLUDED_EMAIL_FINGERPRINTS` in `src/config/missingTimesheetConfig.ts`. No email address is written there: each entry is a SHA-256 fingerprint of the address, so the service can match a person without the address being readable in the repository. The comment above the list shows how to make a fingerprint; delete a line to list that person again. The `.env` setting stays the normal place for exclusions.
 - **Has logged:** any Time Tracker row dated today for that email: a started timer, a finished entry, or a **leave** row. People on leave in Keka (pending or approved, for the half of the day being checked) are never listed.
 - **Missing:** an expected person with no row today. One entry per person; the latest name in the Time Tracker is shown; sorted by name.
 - Unreadable rows (no email, bad date) and future-dated rows are ignored. If the Time Tracker cannot be read, or returns nothing usable, **no list is built and nothing is posted**; nothing is guessed.

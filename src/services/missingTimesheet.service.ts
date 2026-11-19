@@ -7,6 +7,8 @@ import { leaveEmailsForHalf, leaveEmailsOn } from "./kekaLeave.service.js";
 import { TimeTrackerClient } from "../integrations/timeTracker/timeTracker.client.js";
 import type { RawTimeTrackerEntry } from "../integrations/timeTracker/timeTracker.types.js";
 import {
+  emailFingerprint,
+  EXCLUDED_EMAIL_FINGERPRINTS,
   formatTimeLabel,
   readMissingTimesheetConfig,
 } from "../config/missingTimesheetConfig.js";
@@ -19,7 +21,8 @@ import {
 //
 //   people     = everyone with a WORK row in the Time Tracker in the last
 //                30 days before today (leave rows alone do not count), minus
-//                the approved always-excluded emails
+//                the approved always-excluded emails (the .env setting, and
+//                the fingerprints kept in missingTimesheetConfig.ts)
 //   has logged = any Time Tracker row dated today for that email: a started
 //                timer, a finished entry, or a leave row (leave is a
 //                reason to have no timesheet, so it is not "missing")
@@ -104,6 +107,9 @@ export function findMissingTimesheets(input: {
   today: string;
   // Emails that are never listed (approved leadership), any case.
   excludedEmails?: Iterable<string>;
+  // Fingerprints (emailFingerprint) of emails that are never listed either.
+  // Default: the list kept in the code, which holds no readable address.
+  excludedFingerprints?: Iterable<string>;
   // Emails on leave today according to Keka (approved or pending). They are
   // never listed, even when the Time Tracker has no leave row for them.
   leaveEmails?: Iterable<string>;
@@ -111,6 +117,15 @@ export function findMissingTimesheets(input: {
   const excluded = new Set(
     [...(input.excludedEmails ?? [])].map((email) => normEmail(email)),
   );
+
+  const excludedFingerprints = new Set(
+    input.excludedFingerprints ?? EXCLUDED_EMAIL_FINGERPRINTS,
+  );
+
+  const isExcluded = (email: string) =>
+    excluded.has(email) ||
+    (excludedFingerprints.size > 0 &&
+      excludedFingerprints.has(emailFingerprint(email)));
 
   const kekaLeave = new Set(
     [...(input.leaveEmails ?? [])].map((email) => normEmail(email)),
@@ -172,7 +187,7 @@ export function findMissingTimesheets(input: {
   const missing: MissingPerson[] = [];
 
   for (const email of workedRecently) {
-    if (excluded.has(email)) {
+    if (isExcluded(email)) {
       excludedCount++;
       continue;
     }
